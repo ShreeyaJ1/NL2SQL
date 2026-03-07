@@ -1,0 +1,19 @@
+# datasets
+data/
+!data/.gitkeep
+# trained models
+nl2sql/models/*
+!nl2sql/models/.gitkeep
+# python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# environments
+venv/
+.env/
+
+# logs
+*.log
