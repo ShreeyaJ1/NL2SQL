@@ -1,88 +1,73 @@
+"""
+rule_engine.py
+──────────────
+Lightweight generic rule-based fallback for trivially simple queries.
+
+Unlike the old version, this engine has ZERO hardcoded table names,
+column names, or domain-specific logic. It only handles the single
+universal case: "list / show / get everything from a table" where
+the table name is mentioned explicitly in the question.
+
+For all other queries, it returns None and defers to the model.
+"""
+
 import re
-
-def generate_sql_rule_based(question):
-
-    q = question.lower()
-
-    # ------------------------
-    # BLOCK COMPLEX QUERIES
-    # ------------------------
-
-    complex_words = [
-        "average",
-        "avg",
-        "sum",
-        "group",
-        "per",
-        "minimum",
-        "maximum",
-        "oldest",
-        "youngest",
-        "count",
-        "number of"
-    ]
-
-    for word in complex_words:
-        if word in q:
-            return None
+from typing import Any, Dict, Optional
 
 
-    # ------------------------
-    # SELECT COLUMNS
-    # ------------------------
+# Trigger phrases for "show everything" queries
+_SHOW_ALL_PATTERNS = [
+    r"\bshow\s+all\b",
+    r"\blist\s+all\b",
+    r"\bget\s+all\b",
+    r"\bdisplay\s+all\b",
+    r"\bfetch\s+all\b",
+    r"\bsee\s+all\b",
+    r"\bview\s+all\b",
+    r"\bshow\s+everything\b",
+    r"\blist\s+everything\b",
+]
 
-    columns = []
-
-    if "name" in q:
-        columns.append("name")
-
-    if "age" in q:
-        columns.append("age")
-
-    if "major" in q:
-        columns.append("major")
-
-    if not columns:
-        columns = ["*"]
-
-    select_clause = ", ".join(columns)
+_SHOW_ALL_RE = re.compile("|".join(_SHOW_ALL_PATTERNS), re.IGNORECASE)
 
 
-    # ------------------------
-    # CONDITIONS
-    # ------------------------
+def generate_sql_rule_based(
+    question: str,
+    schema: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Try to handle the question with a simple rule — return None if unsure.
 
-    conditions = []
+    Currently handles only:
+      "Show all [table_name]" / "List all [table_name]" / "Get all [table_name]"
+    → SELECT * FROM <table_name>
 
-    grade_match = re.search(r"grade\s*(=|is)?\s*([abc])", q)
-    if grade_match:
-        grade = grade_match.group(2).upper()
-        conditions.append(f"grade = '{grade}'")
+    Parameters
+    ----------
+    question : str
+        The natural language question.
+    schema : dict, optional
+        The current schema dict. Used to verify the table exists.
+        If None, skips table verification.
 
-    age_match = re.search(r"age\s*(=|is)?\s*(\d+)", q)
-    if age_match:
-        age = age_match.group(2)
-        conditions.append(f"age = {age}")
+    Returns
+    -------
+    str or None
+        A SQL string if a rule matched, otherwise None.
+    """
+    if not _SHOW_ALL_RE.search(question):
+        return None
 
-    if "older than" in q:
-        age_match = re.search(r"older than\s*(\d+)", q)
-        if age_match:
-            conditions.append(f"age > {age_match.group(1)}")
+    if schema is None:
+        return None
 
-    majors = ["physics", "biology", "mathematics", "computer science", "chemistry"]
+    # Try to find a table name mentioned in the question
+    q_lower = question.lower()
+    for table_name in schema.keys():
+        # Match both exact name and a simple plural (e.g. "students" → "student")
+        variants = {table_name.lower(), table_name.lower().rstrip("s")}
+        for variant in variants:
+            if variant in q_lower:
+                return f"SELECT * FROM {table_name}"
 
-    for m in majors:
-        if m in q:
-            conditions.append(f"LOWER(major) = LOWER('{m}')")
-
-
-    # ------------------------
-    # BUILD SQL
-    # ------------------------
-
-    sql = f"SELECT {select_clause} FROM students"
-
-    if conditions:
-        sql += " WHERE " + " AND ".join(conditions)
-
-    return sql
+    return None

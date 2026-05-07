@@ -1,16 +1,58 @@
 import torch
+import os
 
+# ─────────────────────────────────────────────
+# DATABASE CONFIGURATION
+# ─────────────────────────────────────────────
 
+# Path to the SQLite database (relative to backend/ or absolute)
+# Change this to point to your own database file.
+DB_PATH = "database/employees.db"
 
-MODEL_PATH = "../nl2sql/models/schema_adapted"
+# ─────────────────────────────────────────────
+# MODEL CONFIGURATION
+# ─────────────────────────────────────────────
 
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+# HuggingFace model for NL2SQL (no API key needed — runs locally)
+# This model is T5-Large fine-tuned on the Spider benchmark.
+# It will be downloaded automatically on first run (~3 GB).
+MODEL_NAME = "tscholak/3vnuv1vf"  # PICARD T5-Large, Spider fine-tuned
 
-MAX_INPUT_LENGTH = 256
-MAX_OUTPUT_LENGTH = 128
+# Fallback smaller model (faster, lower accuracy) — used if large model fails to load
+FALLBACK_MODEL_NAME = "mrm8488/t5-base-finetuned-wikiSQL"
 
-BEAM_SIZE = 4
+# Device: CUDA (NVIDIA GPU) > CPU
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-ALLOWED_SQL = ["select"]
+# ─────────────────────────────────────────────
+# INFERENCE SETTINGS
+# ─────────────────────────────────────────────
 
-DEFAULT_COMPLEX_MESSAGE = "Sorry, this question is too complex for the demo system."
+MAX_INPUT_LENGTH  = 512   # Max tokens for prompt input
+MAX_OUTPUT_LENGTH = 256   # Max tokens for generated SQL
+BEAM_SIZE         = 4     # Beam search width (higher = better but slower)
+
+# ─────────────────────────────────────────────
+# SCHEMA LINKING SETTINGS
+# ─────────────────────────────────────────────
+
+# Max tables to include in prompt for large databases
+MAX_RELEVANT_TABLES = 6
+
+# Minimum score (0–1) for a table to be included in schema linking
+SCHEMA_LINK_THRESHOLD = 0.15
+
+# ─────────────────────────────────────────────
+# SQL EXECUTION SETTINGS
+# ─────────────────────────────────────────────
+
+MAX_RESULTS = 500  # Max rows returned per query
+
+# ─────────────────────────────────────────────
+# RESPONSE MESSAGES
+# ─────────────────────────────────────────────
+
+DEFAULT_ERROR_MESSAGE = (
+    "Could not generate a valid SQL query for this question. "
+    "Please try rephrasing your question or check that it relates to the connected database."
+)
