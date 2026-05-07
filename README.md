@@ -1,294 +1,313 @@
+# NL2SQL — Transformer-Based Natural Language to SQL Engine
 
-# Transformer-Based NL2SQL System
+A sophisticated **Natural Language to SQL (NL2SQL)** system built as a B.Tech CSE (AI/ML) final semester project.
 
-This project implements a **Transformer-based Natural Language to SQL (NL2SQL) system** capable of converting natural language questions into SQL queries, executing them on a database, and returning results.
-
-The system uses a **fine-tuned T5 model** trained on the **Spider dataset**, followed by **schema adaptation fine-tuning** for the target database.
-
-The project also includes a **Flask backend** that allows users to query the system through an API.
+Converts natural language questions into SQL queries, executes them on a configured SQLite database, and returns structured results — with **no LLM API key required**. Everything runs locally.
 
 ---
 
-# Project Architecture
-
-The system pipeline works as follows:
+## Architecture
 
 ```
-Natural Language Question
-        ↓
-Schema Injection
-        ↓
-Fine-tuned Transformer (T5)
-        ↓
-SQL Post-processing
-        ↓
-SQL Safety Validation
-        ↓
-SQLite Query Execution
-        ↓
-Results Returned
+User NL Question
+       │
+       ▼
+┌──────────────────────────┐
+│ 1. Rule Engine (fast)    │  → handles trivial "show all X" queries instantly
+└──────────┬───────────────┘
+           │ (if no match)
+           ▼
+┌──────────────────────────┐
+│ 2. Schema Loader         │  → extracts tables/columns/FKs/samples from SQLite
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 3. Schema Linker (NLP)   │  → prunes to relevant tables (token overlap + fuzzy)
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 4. Query Analyser        │  → detects aggregation, sort, limit, negation, etc.
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 5. Prompt Builder        │  → Spider-style serialization for the T5 model
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 6. T5-Large NL2SQL Model │  → tscholak/3vnuv1vf (Spider fine-tuned, local)
+│    Beam Search (k=4)     │     ~79% exact match on Spider dev set
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 7. SQL Post-Processor    │  → extract + normalise SQL from raw model output
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 8. Safety Validator      │  → reject any non-SELECT or mutation SQL
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│ 9. Schema Verifier       │  → verify table names exist in actual schema
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│10. SQL Repair            │  → fuzzy-match wrong identifiers → auto-correct
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│11. SQL Executor          │  → run on SQLite, return (columns, rows)
+└──────────────────────────┘
 ```
 
 ---
 
-# Repository Structure
+## Repository Structure
 
 ```
-.
+NL2SQL/
 ├── backend/
-│   ├── app.py
+│   ├── app.py                    # Flask API (3 endpoints)
+│   ├── config/
+│   │   └── settings.py           # ← SET DB_PATH HERE
 │   ├── database/
-│   │   └── sample.db
-│   ├── model/
+│   │   ├── db_connector.py       # Unified SQLite layer (schema + execution)
+│   │   ├── create_database.py    # Sample DB creation script
+│   │   └── sample.db             # Sample students database
 │   ├── schema/
+│   │   ├── schema_loader.py      # Cached schema extraction
+│   │   ├── schema_linker.py      # NLP-based schema pruning (rapidfuzz)
+│   │   └── prompt_builder.py     # Spider-style prompt serializer
+│   ├── model/
+│   │   ├── load_model.py         # T5-Large Spider model loader
+│   │   └── inference.py          # Beam search SQL generation
 │   ├── sql/
+│   │   ├── rule_engine.py        # Generic fast-path rule engine
+│   │   ├── query_analyser.py     # NLP intent extraction
+│   │   ├── sql_postprocess.py    # SQL extraction + normalization
+│   │   ├── sql_repair.py         # Fuzzy schema-aware SQL repair
+│   │   ├── sql_validator.py      # Safety validation (SELECT-only)
+│   │   ├── sql_verifier.py       # Schema-level table verification
+│   │   └── sql_executor.py       # SQLite query executor
 │   └── utils/
+│       └── response_formatter.py # Structured JSON response builder
 │
 ├── nl2sql/
-│   ├── scripts/
-│   │   ├── train_model.py
-│   │   ├── micro_finetune.py
-│   │   ├── evaluate_micro.py
-│   │   └── generate_micro_dataset.py
-│   └── models/
+│   ├── models/                   # Downloaded/trained models stored here
+│   └── scripts/                  # Training and evaluation scripts
 │
-├── data/
-│   └── spider/
-│
+├── test_pipeline.py              # End-to-end pipeline smoke test
 ├── requirements.txt
-├── README.md
-└── .gitignore
+└── README.md
 ```
-
-Important notes:
-
-* The **Spider dataset is not included** in this repository due to size.
-* **Trained models are not included**.
-* All datasets and models can be **generated locally using the provided scripts**.
 
 ---
 
-# Installation
+## Installation
 
-## 1. Clone the Repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/sarthakj0304/NL2SQL.git
 cd NL2SQL
 ```
 
----
-
-## 2. Create Conda Environment
+### 2. Create a Virtual Environment
 
 ```bash
-conda create -n major-project python=3.10
-conda activate major-project
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
 ```
 
----
-
-## 3. Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
+Dependencies include:
+- `flask`, `flask-cors` — API server
+- `torch`, `transformers`, `sentencepiece` — T5 model
+- `accelerate` — efficient model loading
+- `rapidfuzz` — fuzzy schema linking
+- `sentence-transformers` — semantic similarity (optional enhancement)
+- `sqlparse` — SQL parsing and validation
+- `datasets` — for training scripts
+
 ---
 
-# Download Spider Dataset
+## Configure Your Database
 
-The Spider dataset must be downloaded manually.
+Edit `backend/config/settings.py` and set `DB_PATH` to your SQLite database:
 
-Download it from the official website:
+```python
+# backend/config/settings.py
+DB_PATH = "database/sample.db"   # ← change this to your .db file path
+```
 
-[https://yale-lily.github.io/spider](https://yale-lily.github.io/spider)
+That's it — the system will **automatically**:
+- Extract all tables, columns, types, and foreign keys
+- Sample values for schema enrichment
+- Work with any schema, any number of tables
 
-After downloading, place the files inside:
+---
 
+## Download the Spider Dataset (for Fine-Tuning Only)
+
+> **Not required for inference.** The pre-trained model runs without Spider.
+> Only needed if you want to fine-tune the model from scratch.
+
+**Option A — HuggingFace (easiest):**
+```bash
+pip install huggingface_hub
+python -c "from datasets import load_dataset; ds = load_dataset('yale-nlp/spider'); print('Downloaded!')"
+```
+
+**Option B — Official website:**
+1. Visit: https://yale-lily.github.io/spider
+2. Fill the form → download `spider.zip`
+3. Extract to `data/spider/`
+
+Structure after extraction:
 ```
 data/spider/
-```
-
-Your folder structure should look like:
-
-```
-data/
- └── spider/
-      ├── database/
-      ├── tables.json
-      ├── train_spider.json
-      └── dev.json
+├── train_spider.json
+├── dev.json
+├── tables.json
+└── database/
 ```
 
 ---
 
-# Train the Base NL2SQL Model
-
-The base model is trained using the Spider dataset.
-
-Run:
+## Run the Server
 
 ```bash
-python nl2sql/scripts/train_model.py
+cd backend
+python app.py
 ```
 
-This will:
+On **first run**, the T5-Large Spider model (~3 GB) will download automatically from HuggingFace and be cached locally. Subsequent runs load from cache instantly.
 
-* Load the Spider dataset
-* Train a T5 model
-* Save the trained model to:
-
-```
-nl2sql/models/advanced_final/
-```
-
-Training time depends on hardware.
+Server starts at: `http://127.0.0.1:5000`
 
 ---
 
-# Generate Schema Adaptation Dataset
+## API Endpoints
 
-The project includes a **micro dataset generator** that creates synthetic NL-SQL pairs for the target schema.
-
-Run:
-
-```bash
-python nl2sql/scripts/generate_micro_dataset.py
-```
-
-This will generate:
-
-```
-nl2sql/models/micro_train.jsonl
-nl2sql/models/micro_eval.jsonl
-```
-
-These datasets are used for **schema-specific fine-tuning**.
-
----
-
-# Run Micro Fine-Tuning
-
-Micro fine-tuning adapts the model to the **students database schema** used in the backend.
-
-Run:
-
-```bash
-python nl2sql/scripts/micro_finetune.py
-```
-
-This will:
-
-* load the base trained model
-* fine-tune on the generated dataset
-* save the adapted model to:
-
-```
-nl2sql/models/schema_adapted/
-```
-
-Training typically takes **2–3 minutes on an M1/M2 Mac**.
-
----
-
-# Evaluate the Adapted Model
-
-Run:
-
-```bash
-python nl2sql/scripts/evaluate_micro.py
-```
-
-This evaluates the model using logical SQL comparison on the micro evaluation dataset.
-
-Example output:
-
-```
----- MICRO DATASET RESULTS ----
-
-Total examples: 60
-Accuracy: 52.33%
-```
-
----
-
-# Run the Backend API
-
-The backend allows users to query the NL2SQL system through a REST API.
-
-Start the Flask server:
-
-```bash
-python backend/app.py
-```
-
-The server will start at:
-
-```
-http://127.0.0.1:5000
-```
-
----
-
-# Query the System
-
-Send a POST request to:
-
-```
-/query
-```
-
-Example request:
+### `POST /api/query` — Main NL2SQL endpoint
 
 ```json
+// Request
+{ "question": "How many students study each major?" }
+
+// Response (success)
 {
-  "question": "Show students with grade A"
+  "success": true,
+  "question": "How many students study each major?",
+  "sql": "SELECT major, COUNT(*) FROM students GROUP BY major",
+  "source": "model",
+  "columns": ["major", "COUNT(*)"],
+  "rows": [["Computer Science", 5], ["Physics", 3]],
+  "row_count": 2
+}
+
+// Response (failure)
+{
+  "success": false,
+  "question": "...",
+  "message": "Could not generate a valid SQL query...",
+  "stage": "validation"
 }
 ```
 
-Example response:
+### `GET /api/schema` — Inspect the connected database
 
 ```json
 {
-  "question": "Show students with grade A",
-  "generated_sql": "SELECT * FROM students WHERE grade='A'",
-  "results": [...]
+  "db_path": "database/sample.db",
+  "tables": {
+    "students": {
+      "columns": [{"name": "id", "type": "INTEGER", "pk": true}, ...],
+      "foreign_keys": [],
+      "sample_values": {"name": ["Alice", "Bob"], "grade": ["A", "B"]},
+      "row_count": 15
+    }
+  }
+}
+```
+
+### `GET /api/health` — Server + model status
+
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "model_name": "tscholak/3vnuv1vf",
+  "db_path": "database/sample.db",
+  "db_reachable": true,
+  "db_tables": 1
 }
 ```
 
 ---
 
-# Example Queries
+## Run Pipeline Tests
+
+Test all stages without starting the server:
+
+```bash
+python test_pipeline.py
+```
+
+---
+
+## Example Queries
 
 ```
 List all students
-Show student names
-Show students with grade A
-Show students studying Physics
-Show students older than 21
+Show all students
+How many students study each major?
+What is the average age of students in Computer Science?
+Show students older than 21 with grade A
+Who are the top 5 youngest students?
+Count students with grade B
 ```
 
 ---
 
+## Model Details
 
-
-# Technologies Used
-
-* Python
-* PyTorch
-* HuggingFace Transformers
-* T5 (Text-to-Text Transformer)
-* SQLite
-* Flask
-
----
-
-# Limitations
-
-* The model may hallucinate joins due to training on multi-table Spider schemas.
-* Accuracy depends on schema similarity with the training dataset.
-* The current system supports **single-table schemas best**.
+| Property | Value |
+|---|---|
+| **Model** | `tscholak/3vnuv1vf` (PICARD T5-Large) |
+| **Parameters** | 770M |
+| **Training data** | Spider NL2SQL benchmark |
+| **Spider accuracy** | ~79% exact match |
+| **Inference** | Beam search, k=4 |
+| **Hardware needed** | CPU + 8 GB RAM (16 GB recommended) |
+| **GPU** | Optional (CUDA auto-detected) |
+| **API key** | None — fully local |
 
 ---
 
+## Technologies Used
+
+| Component | Technology |
+|---|---|
+| Web framework | Flask + Flask-CORS |
+| NL2SQL model | HuggingFace Transformers (T5-Large) |
+| Schema linking | rapidfuzz, token overlap |
+| SQL parsing | sqlparse |
+| Database | SQLite (via Python stdlib) |
+| Inference | PyTorch (beam search) |
+
+---
+
+## Limitations
+
+- Optimised for **SQLite** databases
+- Very complex multi-table JOINs with deep nesting may have lower accuracy
+- Model accuracy depends on how closely the question phrasing matches Spider training data
+- First run requires ~3 GB download for the model weights

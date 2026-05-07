@@ -1,0 +1,22 @@
+# Web framework
+flask
+flask-cors
+
+# ML / Model
+torch
+transformers
+sentencepiece
+accelerate
+
+# Schema linking
+rapidfuzz
+sentence-transformers
+
+# SQL parsing & validation
+sqlparse
+
+# Data utilities
+datasets
+
+# Database drivers
+# psycopg2-binary  # Uncomment if you add PostgreSQL support later
