@@ -1,21 +1,43 @@
+"""
+sql_executor.py
+───────────────
+Executes validated SQL against the configured SQLite database.
+Wraps db_connector.execute_query() with error handling and logging.
+"""
+
 import sqlite3
+from typing import Any, Dict, List, Optional, Tuple
 
-def execute_sql(db_path, sql):
+from database.db_connector import execute_query
+from config.settings import DB_PATH, MAX_RESULTS
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
 
-    cursor.execute(sql)
+def run_sql(
+    sql: str,
+    db_path: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Tuple[List[str], List[List[Any]]]:
+    """
+    Execute `sql` against the database at `db_path`.
 
-    rows = cursor.fetchall()
+    Parameters
+    ----------
+    sql : str
+        A valid, safe SQL query (already validated by sql_validator).
+    db_path : str, optional
+        Path to the SQLite file. Defaults to settings.DB_PATH.
+    limit : int, optional
+        Max rows to return. Defaults to settings.MAX_RESULTS.
 
-    columns = [desc[0] for desc in cursor.description]
+    Returns
+    -------
+    (column_names, rows) : Tuple[List[str], List[List[Any]]]
 
-    conn.close()
-
-    results = []
-
-    for row in rows:
-        results.append(dict(zip(columns, row)))
-
-    return results
+    Raises
+    ------
+    sqlite3.Error
+        On database execution failure (caller should handle this).
+    """
+    path  = db_path  or DB_PATH
+    limit = limit    or MAX_RESULTS
+    return execute_query(path, sql, limit=limit)
