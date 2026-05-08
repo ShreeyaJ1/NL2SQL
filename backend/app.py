@@ -32,6 +32,15 @@ Pipeline (per /api/query request)
 import os
 import sys
 import logging
+import uuid
+from google import genai
+from dotenv import load_dotenv
+
+load_dotenv()
+if os.getenv("GEMINI_API_KEY"):
+    gemini_client = genai.Client()
+else:
+    gemini_client = None
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -53,7 +62,8 @@ from sql.sql_executor       import run_sql
 
 from utils.response_formatter import format_success, format_error
 
-from config.settings import DB_PATH, DEFAULT_ERROR_MESSAGE
+import config.settings
+from config.settings import DEFAULT_ERROR_MESSAGE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App setup
@@ -71,6 +81,43 @@ CORS(app)   # Allow cross-origin requests (useful when connecting a frontend lat
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# File Upload
+# ─────────────────────────────────────────────────────────────────────────────
+
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+@app.route("/upload_db", methods=["POST"])
+def upload_db():
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No selected file"}), 400
+    
+    if not (file.filename.endswith(".db") or file.filename.endswith(".sqlite")):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    file_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}_{file.filename}")
+    file.save(file_path)
+
+    config.settings.DB_PATH = file_path
+    with open(os.path.join(UPLOAD_FOLDER, "last_db.txt"), "w") as f:
+        f.write(file_path)
+
+    try:
+        schema = load_schema(file_path)
+        return jsonify({
+            "success": True,
+            "message": f"Database connected successfully! I've indexed {len(schema)} tables.",
+            "db_name": file.filename,
+            "tables": len(schema)
+        })
+    except Exception as e:
+        log.error("Failed to load schema from uploaded DB: %s", e)
+        return jsonify({"error": "Invalid database file"}), 400
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health check
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -80,7 +127,7 @@ def health():
     db_ok = False
     db_tables = 0
     try:
-        schema = load_schema(DB_PATH)
+        schema = load_schema(config.settings.DB_PATH)
         db_ok = True
         db_tables = len(schema)
     except Exception as e:
@@ -90,7 +137,7 @@ def health():
         "status":       "ok" if db_ok else "degraded",
         "model_loaded": model_is_available(),
         "model_name":   get_active_model_name(),
-        "db_path":      DB_PATH,
+        "db_path":      config.settings.DB_PATH,
         "db_reachable": db_ok,
         "db_tables":    db_tables,
     })
@@ -120,8 +167,8 @@ def schema_view():
     }
     """
     try:
-        schema = load_schema(DB_PATH)
-        return jsonify({"db_path": DB_PATH, "tables": schema})
+        schema = load_schema(config.settings.DB_PATH)
+        return jsonify({"db_path": config.settings.DB_PATH, "tables": schema})
     except Exception as e:
         log.error("Schema load failed: %s", e)
         return jsonify({"error": f"Could not load schema: {e}"}), 500
@@ -174,7 +221,7 @@ def query():
 
     # ── Load schema ───────────────────────────────────────────────────────
     try:
-        full_schema = load_schema(DB_PATH)
+        full_schema = load_schema(config.settings.DB_PATH)
     except Exception as e:
         log.error("Could not load schema: %s", e)
         return jsonify(format_error(question, f"Database error: {e}", stage="schema_load")), 500
@@ -189,7 +236,10 @@ def query():
 
         if verify_sql(sql, full_schema):
             try:
-                columns, rows = run_sql(sql, DB_PATH)
+                columns, rows = run_sql(sql, config.settings.DB_PATH)
+                print("\n" + "="*50)
+                print("⚡ OUTPUT SOURCE: RULE ENGINE")
+                print("="*50 + "\n")
                 log.info("[Rule engine] Success — %d rows", len(rows))
                 return jsonify(format_success(
                     question, sql, columns, rows, source="rule_engine"
@@ -224,11 +274,32 @@ def query():
     log.debug("[Prompt]\n%s", build_debug_prompt(question, linked_schema, hints=hints))
 
     # 2d. Model inference
-    raw_output = generate_sql(prompt)
-    log.info("[Model] Raw output: %s", raw_output)
+    raw_output, confidence_score = generate_sql(prompt)
+    print("\n" + "="*50)
+    print("🤖 OUTPUT SOURCE: MACHINE LEARNING (T5 MODEL)")
+    print("="*50 + "\n")
+    log.info("[Model] Raw output: %s, confidence: %s", raw_output, confidence_score)
 
-    if not raw_output:
-        return jsonify(format_error(question, DEFAULT_ERROR_MESSAGE, stage="inference")), 422
+    if not raw_output or confidence_score < -0.5:
+        log.warning("[Model] T5 failed or low confidence. Falling back to Gemini.")
+        try:
+            if gemini_client:
+                gemini_prompt = f"Given this database schema:\n{linked_schema}\nGenerate ONLY a SQL query for this question: '{question}'. Do not include markdown code blocks, just the raw SQL."
+                response = gemini_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=gemini_prompt
+                )
+                raw_output = response.text.replace("```sql", "").replace("```", "").strip()
+                print("\n" + "="*50)
+                print("🧠 OUTPUT SOURCE: GEMINI API (Fallback for generation)")
+                print("="*50 + "\n")
+                log.info("[Gemini] Generated SQL: %s", raw_output)
+            else:
+                raise Exception("GEMINI_API_KEY is not set.")
+        except Exception as gemini_e:
+            log.error("[Gemini] Fallback failed: %s", gemini_e)
+            if not raw_output:
+                return jsonify(format_error(question, DEFAULT_ERROR_MESSAGE, stage="inference")), 422
 
     # 2e. Post-process
     sql = clean_sql(raw_output)
@@ -262,7 +333,7 @@ def query():
 
     # 2h. Execute
     try:
-        columns, rows = run_sql(sql, DB_PATH)
+        columns, rows = run_sql(sql, config.settings.DB_PATH)
         log.info("[Executor] Success — %d rows", len(rows))
         return jsonify(format_success(question, sql, columns, rows, source="model"))
 
@@ -275,13 +346,35 @@ def query():
 
         if repaired_sql != sql:
             try:
-                columns, rows = run_sql(repaired_sql, DB_PATH)
+                columns, rows = run_sql(repaired_sql, config.settings.DB_PATH)
                 log.info("[Repair+Executor] Success — %d rows", len(rows))
                 return jsonify(format_success(
                     question, repaired_sql, columns, rows, source="model+repair"
                 ))
             except Exception as repair_error:
                 log.error("[Repair+Executor] Also failed: %s", repair_error)
+
+        # Gemini fallback for execution failure
+        log.warning("[Model] T5 SQL execution failed. Falling back to Gemini.")
+        try:
+            if gemini_client:
+                gemini_prompt = f"Given this database schema:\n{linked_schema}\nThe user asked: '{question}'. The following SQL failed to execute: {sql}. Error: {exec_error}. Generate a corrected, valid SQL query. Return ONLY the raw SQL, no markdown."
+                response = gemini_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=gemini_prompt
+                )
+                gemini_sql = clean_sql(response.text.replace("```sql", "").replace("```", "").strip())
+                print("\n" + "="*50)
+                print("🧠 OUTPUT SOURCE: GEMINI API (Fallback for execution repair)")
+                print("="*50 + "\n")
+                log.info("[Gemini Repair] Generated SQL: %s", gemini_sql)
+                
+                columns, rows = run_sql(gemini_sql, config.settings.DB_PATH)
+                return jsonify(format_success(question, gemini_sql, columns, rows, source="gemini_repair"))
+            else:
+                raise Exception("GEMINI_API_KEY is not set.")
+        except Exception as e2:
+            log.error("[Gemini Repair] Failed: %s", e2)
 
         return jsonify(format_error(
             question, DEFAULT_ERROR_MESSAGE, sql=sql, stage="execution"
@@ -294,4 +387,4 @@ def query():
 
 if __name__ == "__main__":
     # Run with debug=False in production
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5010, debug=True)

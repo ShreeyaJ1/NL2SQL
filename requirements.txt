@@ -20,3 +20,7 @@ datasets
 
 # Database drivers
 # psycopg2-binary  # Uncomment if you add PostgreSQL support later
+
+# APIs & Environment
+python-dotenv
+google-genai

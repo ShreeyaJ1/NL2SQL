@@ -7,7 +7,12 @@ import os
 
 # Path to the SQLite database (relative to backend/ or absolute)
 # Change this to point to your own database file.
-DB_PATH = "database/employees.db"
+_last_db_file = os.path.join(os.path.dirname(__file__), "..", "uploads", "last_db.txt")
+if os.path.exists(_last_db_file):
+    with open(_last_db_file, "r") as f:
+        DB_PATH = f.read().strip()
+else:
+    DB_PATH = "database/sample.db"
 
 # ─────────────────────────────────────────────
 # MODEL CONFIGURATION

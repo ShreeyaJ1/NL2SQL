@@ -51,11 +51,17 @@ def generate_sql(prompt: str) -> Optional[str]:
             early_stopping=True,
             no_repeat_ngram_size=3,
             length_penalty=1.0,   # Neutral: don't bias toward short or long
+            output_scores=True,
+            return_dict_in_generate=True,
         )
 
     # Decode — skip special tokens like <pad>, </s>
-    sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return sql.strip()
+    sql = tokenizer.decode(outputs.sequences[0], skip_special_tokens=True)
+    
+    # Get sequence score
+    score = outputs.sequences_scores[0].item() if outputs.sequences_scores is not None else -1.0
+    
+    return sql.strip(), score
 
 
 def model_is_available() -> bool:
