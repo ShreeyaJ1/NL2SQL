@@ -55,7 +55,7 @@ from model.inference        import generate_sql, model_is_available, get_active_
 from sql.rule_engine        import generate_sql_rule_based
 from sql.query_analyser     import analyze_query
 from sql.sql_postprocess    import clean_sql
-from sql.sql_validator      import is_safe_sql
+from sql.sql_validator      import is_safe_sql, is_safe_prompt
 from sql.sql_verifier       import verify_sql
 from sql.sql_repair         import repair_sql
 from sql.sql_executor       import run_sql
@@ -219,6 +219,15 @@ def query():
 
     log.info("Question: %s", question)
 
+    # ── Initial Prompt Safety Check ───────────────────────────────────────
+    if not is_safe_prompt(question):
+        log.warning("[Validator] Rejected unsafe prompt: %s", question)
+        return jsonify(format_error(
+            question, 
+            "Data manipulation not allowed.", 
+            stage="validation"
+        )), 422
+
     # ── Load schema ───────────────────────────────────────────────────────
     try:
         full_schema = load_schema(config.settings.DB_PATH)
@@ -280,11 +289,11 @@ def query():
     print("="*50 + "\n")
     log.info("[Model] Raw output: %s, confidence: %s", raw_output, confidence_score)
 
-    if not raw_output or confidence_score < -0.5:
+    if not raw_output or confidence_score < -0.83:
         log.warning("[Model] T5 failed or low confidence. Falling back to Gemini.")
         try:
             if gemini_client:
-                gemini_prompt = f"Given this database schema:\n{linked_schema}\nGenerate ONLY a SQL query for this question: '{question}'. Do not include markdown code blocks, just the raw SQL."
+                gemini_prompt = f"Given this database schema:\n{linked_schema}\nGenerate ONLY a SQL query for this question: '{question}'. Do not include markdown code blocks, just the raw SQL. If the question asks to manipulate or modify data (e.g., DROP, INSERT, UPDATE, DELETE), generate the exact SQL query requested so it can be correctly processed by our system."
                 response = gemini_client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=gemini_prompt
@@ -315,7 +324,7 @@ def query():
         log.warning("[Validator] Rejected unsafe SQL: %s", sql)
         return jsonify(format_error(
             question,
-            "Generated SQL contains unsafe operations and was rejected.",
+            "Data manipulation not allowed.",
             sql=sql,
             stage="validation",
         )), 422
@@ -368,6 +377,15 @@ def query():
                 print("🧠 OUTPUT SOURCE: GEMINI API (Fallback for execution repair)")
                 print("="*50 + "\n")
                 log.info("[Gemini Repair] Generated SQL: %s", gemini_sql)
+
+                if not is_safe_sql(gemini_sql):
+                    log.warning("[Validator] Rejected unsafe Gemini repair SQL: %s", gemini_sql)
+                    return jsonify(format_error(
+                        question,
+                        "Data manipulation not allowed.",
+                        sql=gemini_sql,
+                        stage="validation",
+                    )), 422
                 
                 columns, rows = run_sql(gemini_sql, config.settings.DB_PATH)
                 return jsonify(format_success(question, gemini_sql, columns, rows, source="gemini_repair"))
