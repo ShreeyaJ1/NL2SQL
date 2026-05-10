@@ -46,7 +46,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 # ── Pipeline imports ──────────────────────────────────────────────────────────
-from schema.schema_loader   import load_schema
+from schema.schema_loader   import load_schema, invalidate_cache
 from schema.schema_linker   import link_schema
 from schema.prompt_builder  import build_prompt, build_debug_prompt
 
@@ -59,6 +59,9 @@ from sql.sql_validator      import is_safe_sql, is_safe_prompt
 from sql.sql_verifier       import verify_sql
 from sql.sql_repair         import repair_sql
 from sql.sql_executor       import run_sql
+
+from database.connector_factory import get_connector
+from database.db_connector      import set_connector, get_active_db_type
 
 from utils.response_formatter import format_success, format_error
 
@@ -89,6 +92,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route("/upload_db", methods=["POST"])
 def upload_db():
+    """Upload a SQLite .db / .sqlite file and connect to it."""
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files["file"]
@@ -102,20 +106,106 @@ def upload_db():
     file.save(file_path)
 
     config.settings.DB_PATH = file_path
+    config.settings.DB_TYPE = "sqlite"
     with open(os.path.join(UPLOAD_FOLDER, "last_db.txt"), "w") as f:
         f.write(file_path)
 
     try:
+        connector = get_connector("sqlite", db_path=file_path)
+        set_connector(connector)
+        invalidate_cache()  # Flush schema cache so fresh schema is loaded
         schema = load_schema(file_path)
         return jsonify({
             "success": True,
             "message": f"Database connected successfully! I've indexed {len(schema)} tables.",
             "db_name": file.filename,
+            "db_type": "sqlite",
             "tables": len(schema)
         })
     except Exception as e:
         log.error("Failed to load schema from uploaded DB: %s", e)
         return jsonify({"error": "Invalid database file"}), 400
+
+
+@app.route("/connect_db", methods=["POST"])
+def connect_db():
+    """
+    Connect to a PostgreSQL or MySQL database via DSN.
+
+    Request body (JSON)
+    -------------------
+    {
+      "db_type": "postgres",
+      "dsn":     "postgresql://user:pass@host:5432/mydb",
+      "schema":  "public"   // optional, Postgres only
+    }
+    OR for MySQL:
+    {
+      "db_type": "mysql",
+      "dsn":     "mysql://user:pass@localhost:3306/mydb"
+    }
+    OR with explicit fields:
+    {
+      "db_type":  "mysql",
+      "host":     "localhost",
+      "port":     3306,
+      "user":     "root",
+      "password": "secret",
+      "database": "mydb"
+    }
+
+    Response (success)
+    ------------------
+    { "success": true, "db_type": "postgres", "tables": 12,
+      "message": "Connected to PostgreSQL — 12 tables indexed." }
+    """
+    data    = request.get_json(silent=True) or {}
+    db_type = (data.get("db_type") or "").strip().lower()
+
+    if not db_type:
+        return jsonify({"error": "'db_type' is required (postgres/mysql)."}), 400
+
+    if db_type == "sqlite":
+        return jsonify({"error": "Use /upload_db to upload a SQLite file."}), 400
+
+    # Build kwargs for the factory
+    factory_kwargs: dict = {}
+    dsn = (data.get("dsn") or "").strip()
+    if dsn:
+        factory_kwargs["dsn"] = dsn
+    for field in ("host", "port", "user", "password", "database"):
+        if data.get(field):
+            factory_kwargs[field] = data[field]
+    if db_type in ("postgres", "postgresql") and data.get("schema"):
+        factory_kwargs["schema"] = data["schema"]
+
+    try:
+        connector = get_connector(db_type, **factory_kwargs)
+    except (ValueError, ImportError) as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Test connectivity before committing
+    if not connector.test_connection():
+        return jsonify({"error": "Could not connect to the database. Check credentials and host."}), 400
+
+    # Register as active connector
+    set_connector(connector)
+    config.settings.DB_TYPE = db_type
+    config.settings.DB_DSN  = dsn
+    invalidate_cache()  # Flush old schema cache
+
+    try:
+        schema = connector.extract_schema()
+        log.info("[connect_db] Connected to %s — %d tables.", db_type, len(schema))
+        return jsonify({
+            "success": True,
+            "db_type": db_type,
+            "tables":  len(schema),
+            "message": f"Connected to {db_type.capitalize()} — {len(schema)} tables indexed.",
+        })
+    except Exception as e:
+        log.error("[connect_db] Schema extraction failed: %s", e)
+        return jsonify({"error": f"Connected but schema extraction failed: {e}"}), 500
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Health check
