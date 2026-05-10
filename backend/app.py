@@ -293,7 +293,8 @@ def query():
         log.warning("[Model] T5 failed or low confidence. Falling back to Gemini.")
         try:
             if gemini_client:
-                gemini_prompt = f"Given this database schema:\n{linked_schema}\nGenerate ONLY a SQL query for this question: '{question}'. Do not include markdown code blocks, just the raw SQL. If the question asks to manipulate or modify data (e.g., DROP, INSERT, UPDATE, DELETE), generate the exact SQL query requested so it can be correctly processed by our system."
+                gemini_schema_str = build_debug_prompt(question, linked_schema, hints=hints)
+                gemini_prompt = f"{gemini_schema_str}\n\nIMPORTANT: Generate ONLY a valid SQL SELECT query for the question above. Use the exact string values shown in the sample comments. Return only raw SQL — no markdown, no explanations."
                 response = gemini_client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=gemini_prompt
@@ -340,6 +341,14 @@ def query():
                 question, DEFAULT_ERROR_MESSAGE, sql=sql, stage="verification"
             )), 422
 
+    # 2g-2. Proactive string literal repair (runs always, before execution)
+    # Fixes cases like WHERE major = 'Math' → 'Mathematics' even when the
+    # SQL is structurally valid but uses abbreviated/hallucinated values.
+    sql_repaired = repair_sql(sql, full_schema)
+    if sql_repaired != sql:
+        log.info("[Repair] Proactive value repair: %s → %s", sql, sql_repaired)
+        sql = sql_repaired
+
     # 2h. Execute
     try:
         columns, rows = run_sql(sql, config.settings.DB_PATH)
@@ -367,7 +376,8 @@ def query():
         log.warning("[Model] T5 SQL execution failed. Falling back to Gemini.")
         try:
             if gemini_client:
-                gemini_prompt = f"Given this database schema:\n{linked_schema}\nThe user asked: '{question}'. The following SQL failed to execute: {sql}. Error: {exec_error}. Generate a corrected, valid SQL query. Return ONLY the raw SQL, no markdown."
+                gemini_schema_str = build_debug_prompt(question, linked_schema, hints=hints)
+                gemini_prompt = f"{gemini_schema_str}\n\nThe following SQL failed: {sql}\nError: {exec_error}\n\nGenerate a corrected, valid SQL query using the exact string values shown in the sample comments above. Return ONLY the raw SQL, no markdown."
                 response = gemini_client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=gemini_prompt
@@ -392,11 +402,11 @@ def query():
             else:
                 raise Exception("GEMINI_API_KEY is not set.")
         except Exception as e2:
-            log.error("[Gemini Repair] Failed: %s", e2)
-
-        return jsonify(format_error(
-            question, DEFAULT_ERROR_MESSAGE, sql=sql, stage="execution"
-        )), 422
+            import traceback
+            log.error("[Gemini Repair] Failed: %s\n%s", e2, traceback.format_exc())
+            return jsonify(format_error(
+                question, f"Gemini Repair Failed: {str(e2)}\nTraceback: {traceback.format_exc()}", sql=sql, stage="execution"
+            )), 422
 
 
 # ─────────────────────────────────────────────────────────────────────────────
